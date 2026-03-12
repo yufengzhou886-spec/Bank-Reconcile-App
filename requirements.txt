@@ -4,3 +4,6 @@ pdfplumber
 openpyxl
 plotly
 supabase
+pdf2image
+pytesseract
+Pillow
