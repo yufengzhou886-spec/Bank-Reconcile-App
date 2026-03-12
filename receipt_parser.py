@@ -14,7 +14,6 @@ def parse_receipt_pdf(pdf_path):
             text = page.extract_text()
 
             # ================= ⭐ 核心升级：OCR 视觉拦截网 =================
-            # 如果这页读不出字，或者字数极其少（比如扫描成图片的 PDF）
             if not text or len(text.strip()) < 10:
                 print(f"⚠️ 第 {page_num} 页未检测到足够文本，疑似扫描件，正在启动 OCR 视觉引擎...")
                 try:
@@ -24,17 +23,25 @@ def parse_receipt_pdf(pdf_path):
                         # 呼叫 Tesseract 引擎进行中文提取
                         text = pytesseract.image_to_string(images[0], lang='chi_sim')
                         print(f"✅ 第 {page_num} 页 OCR 识别完成！")
-                except Exception as e:
-                    print(f"❌ 第 {page_num} 页 OCR 识别失败: {e}")
-                    text = ""  # 失败了就给个空字符串，防止后面报错
-            # ===============================================================
 
-            # 如果 OCR 扫完还是没字，说明真的是张白纸，直接跳过这页
+                        # ================= ⭐ 暴力显形代码（排查专用） ⭐ =================
+                        # 只要 OCR 跑完了，立刻强行报错中断程序，把提取到的乱码甩到网页红框里！
+                        raise ValueError(f"【OCR提取到的原文如下，请复制发给我分析】\n\n{text}")
+                        # ===============================================================
+
+                except Exception as e:
+                    # 如果是我们自己抛出的测试异常，就继续往外抛，让网页显示出来
+                    if "OCR提取到的原文如下" in str(e):
+                        raise e
+                    print(f"❌ 第 {page_num} 页 OCR 识别失败: {e}")
+                    text = ""
+                    # ===============================================================
+
+            # 如果 OCR 扫完还是没字，跳过这页
             if not text:
                 continue
 
-            # ================= ⬇️ 你原本极其优秀的解析逻辑（完全没动） ⬇️ =================
-            # 用“出账回单”作为分隔符 (这里的 \s* 刚好能完美兼容 OCR 产生的多余空格)
+            # ================= ⬇️ 你的核心解析逻辑（未修改） ⬇️ =================
             blocks = re.split(r"出\s*账\s*回\s*单", text)
 
             for block in blocks:
