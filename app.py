@@ -29,6 +29,15 @@ def init_env():
 init_env()
 
 
+# ================= ⭐ 新增：重置状态的函数 =================
+def reset_state():
+    """当上传框里的文件发生变动时，立刻抹除系统'已对账'的记忆"""
+    if "is_processed" in st.session_state:
+        st.session_state.is_processed = False
+
+
+# =======================================================
+
 @st.cache_data(show_spinner=False)
 def process_single_bank(file_bytes, file_name):
     temp_path = os.path.join(TEMP_DIR, f"bank_{file_name}")
@@ -55,7 +64,6 @@ st.title("📊 智能财务对账系统")
 st.markdown("支持批量上传并合并对账，对账结果将自动同步至云端看板。")
 st.divider()
 
-# ================= ⭐ 核心优化：双标签页结构 =================
 tab_reconcile, tab_history = st.tabs(["🔍 进行对账 (工作台)", "📈 历史报表 (大屏)"])
 
 # ----------------- 标签页 1：对账工作台 -----------------
@@ -64,11 +72,15 @@ with tab_reconcile:
 
     with col1:
         st.subheader("🏦 1. 银行对账单 (支持多选)")
-        bank_files = st.file_uploader("请拖拽或选择多个银行流水 PDF", type=["pdf"], key="bank", accept_multiple_files=True)
+        # 注意这里加了 on_change=reset_state
+        bank_files = st.file_uploader("请拖拽或选择多个银行流水 PDF", type=["pdf"], key="bank", accept_multiple_files=True,
+                                      on_change=reset_state)
 
     with col2:
         st.subheader("🧾 2. 电子回单 (支持多选)")
-        receipt_files = st.file_uploader("请拖拽或选择多个回单 PDF", type=["pdf"], key="receipt", accept_multiple_files=True)
+        # 注意这里加了 on_change=reset_state
+        receipt_files = st.file_uploader("请拖拽或选择多个回单 PDF", type=["pdf"], key="receipt", accept_multiple_files=True,
+                                         on_change=reset_state)
 
     st.markdown("<br>", unsafe_allow_html=True)
     col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
@@ -182,7 +194,6 @@ with tab_history:
     st.subheader("🌍 云端对账历史数据")
     st.info("💡 这里的每次记录都来自于工作台点击【☁️ 备份本次对账概览到云端】按钮产生的数据。")
 
-    # 获取数据的按钮，不加缓存，保证每次点击都能看到最新数据
     if st.button("🔄 刷新最新报表数据"):
         with st.spinner("正在从云端拉取数据..."):
             try:
@@ -190,17 +201,13 @@ with tab_history:
                 key: str = st.secrets["SUPABASE_KEY"]
                 supabase: Client = create_client(url, key)
 
-                # 从数据库拉取所有记录，按时间倒序排
                 response = supabase.table("history_logs").select("*").order("created_at", desc=False).execute()
                 history_data = response.data
 
                 if not history_data:
                     st.warning("📭 云端数据库目前还是空的，请先在工作台跑一次对账并备份。")
                 else:
-                    # 转换成 DataFrame 方便处理
                     df_hist = pd.DataFrame(history_data)
-
-                    # 清洗时间格式 (把 UTC 时间转成好看的本地日期)
                     df_hist["created_at"] = pd.to_datetime(df_hist["created_at"]).dt.tz_convert(
                         'Asia/Shanghai').dt.strftime('%Y-%m-%d %H:%M')
                     df_hist.rename(columns={
@@ -210,28 +217,18 @@ with tab_history:
                         "matched_count": "成功匹配数"
                     }, inplace=True)
 
-                    # 计算一个额外的指标：匹配成功率
                     df_hist["成功率(%)"] = (df_hist["成功匹配数"] / df_hist["总流水数"] * 100).round(1)
 
-                    # --- 画折线大图 ---
                     fig_line = px.line(
-                        df_hist,
-                        x="备份时间",
-                        y="成功匹配数",
-                        markers=True,
-                        title="历次对账成功匹配数量走势图",
-                        color_discrete_sequence=["#1f77b4"]
+                        df_hist, x="备份时间", y="成功匹配数", markers=True,
+                        title="历次对账成功匹配数量走势图", color_discrete_sequence=["#1f77b4"]
                     )
                     fig_line.update_traces(line=dict(width=3), marker=dict(size=8))
                     st.plotly_chart(fig_line, use_container_width=True)
 
-                    # --- 展示数据明细表 ---
                     st.markdown("#### 📝 历史备份明细")
-                    st.dataframe(
-                        df_hist.sort_values(by="备份时间", ascending=False),  # 明细表倒序，最新的在最上面
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                    st.dataframe(df_hist.sort_values(by="备份时间", ascending=False), use_container_width=True,
+                                 hide_index=True)
 
             except Exception as e:
                 st.error(f"❌ 无法连接到云端数据库，请检查 Secrets 配置或网络: {e}")
