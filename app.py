@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import shutil
 import plotly.express as px
+from supabase import create_client, Client  # ⭐ 引入 Supabase 库
 
 # 导入你原有的核心逻辑（完全无需修改）
 from pdf_parser import parse_bank_pdf
@@ -10,18 +11,20 @@ from receipt_parser import parse_receipt_pdf
 from data_cleaner import clean_bank_data
 from reconciler import reconcile_and_export
 
+# 页面配置设置（必须在第一行 Streamlit 命令）
 st.set_page_config(
     page_title="智能财务对账系统",
     page_icon="📊",
     layout="wide"
 )
 
+# 临时目录配置
 TEMP_DIR = "temp_workspace"
 OUTPUT_DIR = "output_workspace"
 
 
 def init_env():
-    """初始化文件夹"""
+    """初始化清理临时文件夹"""
     for d in [TEMP_DIR, OUTPUT_DIR]:
         if not os.path.exists(d):
             os.makedirs(d)
@@ -31,9 +34,6 @@ init_env()
 
 
 # ================= ⭐ 核心优化：单文件解析缓存 =================
-# 我们把缓存细化到了“单个文件”。这样如果你传了 A、B、C 三个文件，
-# 后来又加了一个 D 文件，系统只会去解析 D，前面三个直接从内存秒读！
-
 @st.cache_data(show_spinner=False)
 def process_single_bank(file_bytes, file_name):
     temp_path = os.path.join(TEMP_DIR, f"bank_{file_name}")
@@ -63,35 +63,35 @@ st.title("📊 智能财务对账系统")
 st.markdown("支持**批量上传**多个银行对账单和出账回单，系统将自动合并、清洗并进行全局匹配对账。")
 st.divider()
 
+# 使用两列布局放置上传组件
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("🏦 1. 银行对账单 (支持多选)")
-    # ⭐ 开启多文件上传：accept_multiple_files=True
     bank_files = st.file_uploader("请拖拽或选择多个银行流水 PDF", type=["pdf"], key="bank", accept_multiple_files=True)
 
 with col2:
     st.subheader("🧾 2. 电子回单 (支持多选)")
-    # ⭐ 开启多文件上传：accept_multiple_files=True
     receipt_files = st.file_uploader("请拖拽或选择多个回单 PDF", type=["pdf"], key="receipt", accept_multiple_files=True)
 
+# 居中放置运行按钮
 st.markdown("<br>", unsafe_allow_html=True)
 col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
 with col_btn2:
     run_button = st.button("🚀 开始批量对账", use_container_width=True, type="primary")
 
-# 记忆按钮的点击状态
+# 记忆按钮的点击状态，防止页面刷新丢失结果
 if "is_processed" not in st.session_state:
     st.session_state.is_processed = False
 
 if run_button:
-    # 只要两边都至少有 1 个文件就可以跑
     if not bank_files or not receipt_files:
         st.warning("⚠️ 请先至少上传一份【银行对账单】和一份【电子回单】！")
         st.session_state.is_processed = False
     else:
         st.session_state.is_processed = True
 
+# 只有当处理状态为 True，且文件没有被清空时，才展示结果
 if st.session_state.is_processed and bank_files and receipt_files:
     with st.spinner("系统正在努力解析和合并多个文件，请稍候..."):
         try:
@@ -102,7 +102,6 @@ if st.session_state.is_processed and bank_files and receipt_files:
                 if not df.empty:
                     df_bank_list.append(df)
 
-            # 把所有零碎的账单拼成一张“超级大表”
             df_bank_all = pd.concat(df_bank_list, ignore_index=True) if df_bank_list else pd.DataFrame()
 
             # === 2. 批量处理电子回单并缝合 ===
@@ -112,7 +111,6 @@ if st.session_state.is_processed and bank_files and receipt_files:
                 if not df.empty:
                     df_receipt_list.append(df)
 
-            # 同样拼成回单的“超级大表”
             df_receipt_all = pd.concat(df_receipt_list, ignore_index=True) if df_receipt_list else pd.DataFrame()
 
             # === 3. 拦截空表 ===
@@ -122,13 +120,12 @@ if st.session_state.is_processed and bank_files and receipt_files:
                 st.error("❌ 电子回单全部解析失败或数据为空，请检查文件格式。")
             else:
                 # === 4. 调用对账逻辑 ===
-                # 直接把超级大表扔进去对账，底层毫无察觉
                 df_result = get_reconcile_result(df_bank_all, df_receipt_all)
                 display_df = df_result.copy()
 
                 st.success(f"🎉 批量加载成功！共合并了 {len(bank_files)} 份银行流水和 {len(receipt_files)} 份回单文件。")
 
-                # === 统计数据卡片 ===
+                # === 5. 统计数据卡片 ===
                 st.subheader("📈 对账概览")
                 m1, m2, m3 = st.columns(3)
                 m1.metric("合并后银行流水笔数", len(df_bank_all))
@@ -136,7 +133,31 @@ if st.session_state.is_processed and bank_files and receipt_files:
                 matched_count = len(df_result[df_result["状态"] == "✔ 已对账"])
                 m3.metric("成功匹配笔数", matched_count)
 
-                # === 可视化图表区 ===
+                # ================= ⭐ 新增：云端备份按钮 =================
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("☁️ 备份本次对账概览到云端数据库", type="secondary"):
+                    try:
+                        # 从 Streamlit Secrets 里获取 Supabase 密钥
+                        url: str = st.secrets["SUPABASE_URL"]
+                        key: str = st.secrets["SUPABASE_KEY"]
+                        supabase: Client = create_client(url, key)
+
+                        # 组装要保存的数据
+                        log_data = {
+                            "bank_count": len(df_bank_all),
+                            "receipt_count": len(df_receipt_all),
+                            "matched_count": matched_count
+                        }
+
+                        # 写入 Supabase 的 history_logs 表
+                        data, count = supabase.table("history_logs").insert(log_data).execute()
+                        st.success("✅ 云端备份成功！老板以后随时可以拉历史报表啦！")
+                        st.balloons()  # 庆祝动画
+                    except Exception as e:
+                        st.error(f"❌ 备份失败，请检查网络或 Secrets 配置: {e}")
+                # ===============================================================
+
+                # === 6. 可视化图表区 ===
                 st.divider()
                 st.subheader("🎨 财务可视化分析")
                 chart_col1, chart_col2 = st.columns(2)
@@ -174,7 +195,7 @@ if st.session_state.is_processed and bank_files and receipt_files:
                     else:
                         st.info("没有支出记录，无法生成支出图表。")
 
-                # === 交互式数据表格 ===
+                # === 7. 交互式数据表格 ===
                 st.divider()
                 st.subheader("📋 详细对账结果 (支持手动修改)")
                 st.info("💡 提示：您可以双击表格手动更改状态。由于开启了智能缓存，修改操作将瞬间响应。")
@@ -192,7 +213,7 @@ if st.session_state.is_processed and bank_files and receipt_files:
                     use_container_width=True, hide_index=True, height=400
                 )
 
-                # === 提供 Excel 下载 ===
+                # === 8. 提供 Excel 下载 ===
                 st.divider()
                 st.subheader("💾 导出结果")
                 final_excel_path = os.path.join(OUTPUT_DIR, "最终汇总对账单.xlsx")
