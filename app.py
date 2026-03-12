@@ -4,7 +4,7 @@ import os
 import shutil
 import plotly.express as px
 
-# 导入你原有的核心逻辑
+# 导入你原有的核心逻辑（完全无需修改）
 from pdf_parser import parse_bank_pdf
 from receipt_parser import parse_receipt_pdf
 from data_cleaner import clean_bank_data
@@ -30,25 +30,25 @@ def init_env():
 init_env()
 
 
-# ================= ⭐ 核心优化：智能缓存装饰器 =================
-# 加上 @st.cache_data 后，只要上传的 PDF 文件内容（file_bytes）不变，
-# 这些函数就不会重复执行，而是直接“瞬间”返回上一次解析好的 DataFrame！
+# ================= ⭐ 核心优化：单文件解析缓存 =================
+# 我们把缓存细化到了“单个文件”。这样如果你传了 A、B、C 三个文件，
+# 后来又加了一个 D 文件，系统只会去解析 D，前面三个直接从内存秒读！
 
 @st.cache_data(show_spinner=False)
-def load_and_clean_bank(file_bytes):
-    bank_path = os.path.join(TEMP_DIR, "bank.pdf")
-    with open(bank_path, "wb") as f:
+def process_single_bank(file_bytes, file_name):
+    temp_path = os.path.join(TEMP_DIR, f"bank_{file_name}")
+    with open(temp_path, "wb") as f:
         f.write(file_bytes)
-    raw_df = parse_bank_pdf(bank_path)
+    raw_df = parse_bank_pdf(temp_path)
     return clean_bank_data(raw_df)
 
 
 @st.cache_data(show_spinner=False)
-def load_receipts(file_bytes):
-    receipt_path = os.path.join(TEMP_DIR, "receipt.pdf")
-    with open(receipt_path, "wb") as f:
+def process_single_receipt(file_bytes, file_name):
+    temp_path = os.path.join(TEMP_DIR, f"receipt_{file_name}")
+    with open(temp_path, "wb") as f:
         f.write(file_bytes)
-    return parse_receipt_pdf(receipt_path)
+    return parse_receipt_pdf(temp_path)
 
 
 @st.cache_data(show_spinner=False)
@@ -60,68 +60,79 @@ def get_reconcile_result(df_bank, df_receipt):
 
 # ----------------- UI 界面构建 -----------------
 st.title("📊 智能财务对账系统")
-st.markdown("上传您的银行对账单和出账回单，系统将自动进行解析、清洗与匹配对账。")
+st.markdown("支持**批量上传**多个银行对账单和出账回单，系统将自动合并、清洗并进行全局匹配对账。")
 st.divider()
 
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("🏦 1. 银行对账单 (Bank PDF)")
-    bank_file = st.file_uploader("请上传银行流水的 PDF 文件", type=["pdf"], key="bank")
+    st.subheader("🏦 1. 银行对账单 (支持多选)")
+    # ⭐ 开启多文件上传：accept_multiple_files=True
+    bank_files = st.file_uploader("请拖拽或选择多个银行流水 PDF", type=["pdf"], key="bank", accept_multiple_files=True)
 
 with col2:
-    st.subheader("🧾 2. 电子回单 (Receipt PDF)")
-    receipt_file = st.file_uploader("请上传包含多张回单的 PDF 文件", type=["pdf"], key="receipt")
+    st.subheader("🧾 2. 电子回单 (支持多选)")
+    # ⭐ 开启多文件上传：accept_multiple_files=True
+    receipt_files = st.file_uploader("请拖拽或选择多个回单 PDF", type=["pdf"], key="receipt", accept_multiple_files=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
 with col_btn2:
-    run_button = st.button("🚀 开始智能对账", use_container_width=True, type="primary")
+    run_button = st.button("🚀 开始批量对账", use_container_width=True, type="primary")
 
-# ================= ⭐ 核心优化：页面状态保持 =================
-# 记忆按钮的点击状态，防止用户点击表格导致页面刷新后，结果直接消失
+# 记忆按钮的点击状态
 if "is_processed" not in st.session_state:
     st.session_state.is_processed = False
 
 if run_button:
-    if not bank_file or not receipt_file:
-        st.warning("⚠️ 请先上传【银行对账单】和【电子回单】两个 PDF 文件！")
+    # 只要两边都至少有 1 个文件就可以跑
+    if not bank_files or not receipt_files:
+        st.warning("⚠️ 请先至少上传一份【银行对账单】和一份【电子回单】！")
         st.session_state.is_processed = False
     else:
         st.session_state.is_processed = True
 
-# 只有当处理状态为 True，且文件没有被用户清空时，才展示结果
-if st.session_state.is_processed and bank_file and receipt_file:
-    # ===============================================================
-
-    with st.spinner("系统正在努力解析数据，请稍候..."):
+if st.session_state.is_processed and bank_files and receipt_files:
+    with st.spinner("系统正在努力解析和合并多个文件，请稍候..."):
         try:
-            # 1. 获取文件的二进制数据，这是触发缓存的关键钥匙
-            bank_bytes = bank_file.getvalue()
-            receipt_bytes = receipt_file.getvalue()
+            # === 1. 批量处理银行账单并缝合 ===
+            df_bank_list = []
+            for bf in bank_files:
+                df = process_single_bank(bf.getvalue(), bf.name)
+                if not df.empty:
+                    df_bank_list.append(df)
 
-            # 2. 调用带有缓存的函数（第二次执行时瞬间完成）
-            df_bank = load_and_clean_bank(bank_bytes)
-            df_receipt = load_receipts(receipt_bytes)
+            # 把所有零碎的账单拼成一张“超级大表”
+            df_bank_all = pd.concat(df_bank_list, ignore_index=True) if df_bank_list else pd.DataFrame()
 
-            if df_bank.empty:
-                st.error("❌ 银行对账单解析失败或数据为空，请检查文件格式。")
-            elif df_receipt.empty:
-                st.error("❌ 电子回单解析失败或数据为空，请检查文件格式。")
+            # === 2. 批量处理电子回单并缝合 ===
+            df_receipt_list = []
+            for rf in receipt_files:
+                df = process_single_receipt(rf.getvalue(), rf.name)
+                if not df.empty:
+                    df_receipt_list.append(df)
+
+            # 同样拼成回单的“超级大表”
+            df_receipt_all = pd.concat(df_receipt_list, ignore_index=True) if df_receipt_list else pd.DataFrame()
+
+            # === 3. 拦截空表 ===
+            if df_bank_all.empty:
+                st.error("❌ 银行对账单全部解析失败或数据为空，请检查文件格式。")
+            elif df_receipt_all.empty:
+                st.error("❌ 电子回单全部解析失败或数据为空，请检查文件格式。")
             else:
-                # 3. 对账逻辑同样被缓存
-                df_result = get_reconcile_result(df_bank, df_receipt)
-
-                # 为了防止用户修改表格导致原数据被污染，我们用 copy() 传给表格
+                # === 4. 调用对账逻辑 ===
+                # 直接把超级大表扔进去对账，底层毫无察觉
+                df_result = get_reconcile_result(df_bank_all, df_receipt_all)
                 display_df = df_result.copy()
 
-                st.success("🎉 数据加载成功！(已启用智能缓存，修改表格不会重复解析PDF)")
+                st.success(f"🎉 批量加载成功！共合并了 {len(bank_files)} 份银行流水和 {len(receipt_files)} 份回单文件。")
 
                 # === 统计数据卡片 ===
                 st.subheader("📈 对账概览")
                 m1, m2, m3 = st.columns(3)
-                m1.metric("银行流水总笔数", len(df_bank))
-                m2.metric("识别到回单总笔数", len(df_receipt))
+                m1.metric("合并后银行流水笔数", len(df_bank_all))
+                m2.metric("合并后识别回单笔数", len(df_receipt_all))
                 matched_count = len(df_result[df_result["状态"] == "✔ 已对账"])
                 m3.metric("成功匹配笔数", matched_count)
 
@@ -133,22 +144,15 @@ if st.session_state.is_processed and bank_file and receipt_file:
                 with chart_col1:
                     status_counts = df_result["状态"].value_counts().reset_index()
                     status_counts.columns = ["状态", "数量"]
-
                     color_map = {
                         "✔ 已对账": "#28a745",
                         "❌ 未找到回单": "#dc3545",
                         "➕ 收入-不校验": "#6c757d",
                         "⚠️ 人工确认已核对": "#ffc107"
                     }
-
                     fig_pie = px.pie(
-                        status_counts,
-                        names="状态",
-                        values="数量",
-                        title="对账状态分布 (笔数)",
-                        color="状态",
-                        color_discrete_map=color_map,
-                        hole=0.4
+                        status_counts, names="状态", values="数量", title="对账状态分布 (笔数)",
+                        color="状态", color_discrete_map=color_map, hole=0.4
                     )
                     st.plotly_chart(fig_pie, use_container_width=True)
 
@@ -157,22 +161,14 @@ if st.session_state.is_processed and bank_file and receipt_file:
                     if not df_expense.empty:
                         df_expense["支出金额"] = df_expense["银行金额"].abs().round(2)
                         df_expense["纯日期"] = pd.to_datetime(df_expense["交易日期"]).dt.strftime('%Y-%m-%d')
-
                         daily_expense = df_expense.groupby("纯日期")["支出金额"].sum().reset_index()
                         daily_expense["支出金额"] = daily_expense["支出金额"].round(2)
-
                         fig_bar = px.bar(
-                            daily_expense,
-                            x="纯日期",
-                            y="支出金额",
-                            title="每日支出金额汇总 (元)",
-                            text_auto='.2f',
-                            color_discrete_sequence=["#FF7F0E"]
+                            daily_expense, x="纯日期", y="支出金额", title="每日支出金额汇总 (元)",
+                            text_auto='.2f', color_discrete_sequence=["#FF7F0E"]
                         )
                         fig_bar.update_layout(
-                            xaxis_title="交易日期",
-                            yaxis_title="总支出金额 (元)",
-                            xaxis={'type': 'category'}
+                            xaxis_title="交易日期", yaxis_title="总支出金额 (元)", xaxis={'type': 'category'}
                         )
                         st.plotly_chart(fig_bar, use_container_width=True)
                     else:
@@ -188,36 +184,24 @@ if st.session_state.is_processed and bank_file and receipt_file:
                 edited_df = st.data_editor(
                     display_df,
                     column_config={
-                        "状态": st.column_config.SelectboxColumn(
-                            "状态 (双击修改)",
-                            width="medium",
-                            options=status_options,
-                            required=True,
-                        ),
-                        "未对账原因": st.column_config.TextColumn(
-                            "未对账原因/备注 (双击修改)",
-                        )
+                        "状态": st.column_config.SelectboxColumn("状态 (双击修改)", width="medium", options=status_options,
+                                                               required=True),
+                        "未对账原因": st.column_config.TextColumn("未对账原因/备注 (双击修改)")
                     },
                     disabled=["交易日期", "银行金额", "匹配回单数", "月份"],
-                    use_container_width=True,
-                    hide_index=True,
-                    height=400
+                    use_container_width=True, hide_index=True, height=400
                 )
 
                 # === 提供 Excel 下载 ===
                 st.divider()
                 st.subheader("💾 导出结果")
-
                 final_excel_path = os.path.join(OUTPUT_DIR, "最终汇总对账单.xlsx")
                 edited_df.to_excel(final_excel_path, index=False)
 
                 with open(final_excel_path, "rb") as f:
                     st.download_button(
-                        label="📥 下载最新对账 Excel",
-                        data=f,
-                        file_name="自动化对账结果(含人工微调).xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        type="primary"
+                        label="📥 下载最新对账 Excel", data=f, file_name="自动化批量对账结果.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary"
                     )
 
         except Exception as e:
