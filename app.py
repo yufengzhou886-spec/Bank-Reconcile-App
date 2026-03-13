@@ -68,7 +68,6 @@ def reset_state():
         st.session_state.is_processed = False
 
 
-# ⭐ 注意这里新增了 bank_type 参数
 @st.cache_data(show_spinner=False)
 def process_single_bank(file_bytes, file_name, bank_type):
     temp_path = os.path.join(TEMP_DIR, f"bank_{file_name}")
@@ -106,7 +105,6 @@ with tab_reconcile:
     with col1:
         st.subheader("🏦 1. 银行对账单 (支持多选)")
 
-        # ⭐ 新增：银行类型选择器
         bank_type = st.selectbox(
             "👉 请选择银行模板",
             options=["招商银行", "工商银行 (开发中)"],
@@ -139,7 +137,7 @@ with tab_reconcile:
     if st.session_state.is_processed and bank_files and receipt_files:
         with st.spinner("系统正在努力解析和合并多个文件，请稍候..."):
             try:
-                # ⭐ 批量解析文件，并把用户选择的 bank_type 传进处理函数中
+                # 批量解析文件，并把用户选择的 bank_type 传进处理函数中
                 df_bank_list = [process_single_bank(bf.getvalue(), bf.name, bank_type) for bf in bank_files]
                 df_bank_list = [df for df in df_bank_list if not df.empty]
                 df_bank_all = pd.concat(df_bank_list, ignore_index=True) if df_bank_list else pd.DataFrame()
@@ -161,7 +159,6 @@ with tab_reconcile:
                     m1.metric("合并后流水笔数", len(df_bank_all))
                     m2.metric("合并后回单笔数", len(df_receipt_all))
 
-                    # 涵盖所有成功状态
                     success_statuses = ["✔ 精确匹配", "⚠️ 容差匹配(含手续费)", "🔄 组合匹配(多张回单)"]
                     matched_count = len(df_result[df_result["状态"].isin(success_statuses)])
                     m3.metric("成功匹配笔数", matched_count)
@@ -225,10 +222,22 @@ with tab_reconcile:
                         use_container_width=True, hide_index=True, height=400
                     )
 
+                    # ⭐ 完美版 Excel 导出引擎（带自适应列宽）
                     st.divider()
                     st.subheader("💾 导出结果")
                     final_excel_path = os.path.join(OUTPUT_DIR, "最终对账单.xlsx")
-                    edited_df.to_excel(final_excel_path, index=False)
+
+                    with pd.ExcelWriter(final_excel_path, engine='openpyxl') as writer:
+                        edited_df.to_excel(writer, index=False, sheet_name='自动对账明细')
+                        worksheet = writer.sheets['自动对账明细']
+
+                        # 遍历每一列，动态计算最合适的宽度
+                        for i, col in enumerate(edited_df.columns):
+                            # 计算这一列里最长的那行字有多少个字符，包含列名本身
+                            max_len = max(edited_df[col].astype(str).apply(len).max(), len(str(col)))
+                            # 稍微加一点余量，乘以 2.2 确保中文和日期不被挤压
+                            worksheet.column_dimensions[chr(65 + i)].width = max_len * 2.2
+
                     with open(final_excel_path, "rb") as f:
                         st.download_button("📥 下载最新对账 Excel", data=f, file_name="自动化批量对账结果.xlsx",
                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
