@@ -152,12 +152,15 @@ with tab_reconcile:
 
                     st.success(f"🎉 批量加载成功！共合并了 {len(bank_files)} 份银行流水和 {len(receipt_files)} 份回单。")
 
-                    # 统计卡片
+                    # ⭐ 更新后的统计卡片
                     st.subheader("📈 对账概览")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("合并后流水笔数", len(df_bank_all))
                     m2.metric("合并后回单笔数", len(df_receipt_all))
-                    matched_count = len(df_result[df_result["状态"] == "✔ 已对账"])
+
+                    # 涵盖所有成功状态
+                    success_statuses = ["✔ 精确匹配", "⚠️ 容差匹配(含手续费)", "🔄 组合匹配(多张回单)"]
+                    matched_count = len(df_result[df_result["状态"].isin(success_statuses)])
                     m3.metric("成功匹配笔数", matched_count)
 
                     # 云端备份
@@ -179,15 +182,24 @@ with tab_reconcile:
                         except Exception as e:
                             st.error(f"❌ 备份失败: {e}")
 
-                    # 绘图区域
+                    # ⭐ 更新后的绘图区域
                     st.divider()
                     st.subheader("🎨 财务可视化分析")
                     chart_col1, chart_col2 = st.columns(2)
                     with chart_col1:
                         status_counts = df_result["状态"].value_counts().reset_index()
                         status_counts.columns = ["状态", "数量"]
-                        color_map = {"✔ 已对账": "#28a745", "❌ 未找到回单": "#dc3545", "➕ 收入-不校验": "#6c757d",
-                                     "⚠️ 人工确认已核对": "#ffc107"}
+
+                        # 给新状态赋予极具辨识度的专属颜色！
+                        color_map = {
+                            "✔ 精确匹配": "#28a745",  # 绿色：完美
+                            "⚠️ 容差匹配(含手续费)": "#17a2b8",  # 蓝绿色：轻微注意
+                            "🔄 组合匹配(多张回单)": "#6f42c1",  # 紫色：算法发力
+                            "❌ 未找到回单": "#dc3545",  # 红色：未匹配
+                            "➕ 收入-不校验": "#6c757d",  # 灰色：跳过
+                            "⚠️ 人工确认已核对": "#ffc107"  # 黄色：人工介入
+                        }
+
                         fig_pie = px.pie(status_counts, names="状态", values="数量", title="状态分布", color="状态",
                                          color_discrete_map=color_map, hole=0.4)
                         st.plotly_chart(fig_pie, use_container_width=True)
@@ -204,15 +216,18 @@ with tab_reconcile:
                         else:
                             st.info("没有支出记录。")
 
-                    # 数据表格展示
+                    # ⭐ 更新后的数据表格展示
                     st.divider()
                     st.subheader("📋 详细结果 (支持双击修改)")
-                    status_options = ["✔ 已对账", "❌ 未找到回单", "➕ 收入-不校验", "⚠️ 人工确认已核对"]
+
+                    # 把新状态加入双击修改的选项中
+                    status_options = ["✔ 精确匹配", "⚠️ 容差匹配(含手续费)", "🔄 组合匹配(多张回单)", "❌ 未找到回单", "➕ 收入-不校验", "⚠️ 人工确认已核对"]
+
                     edited_df = st.data_editor(
                         display_df,
                         column_config={
                             "状态": st.column_config.SelectboxColumn("状态 (双击修改)", options=status_options, required=True)},
-                        disabled=["交易日期", "银行金额", "匹配回单数", "月份"],
+                        disabled=["交易日期", "银行金额", "匹配回单数", "月份", "智能备注"],  # 注意这里锁定了智能备注列
                         use_container_width=True, hide_index=True, height=400
                     )
 
