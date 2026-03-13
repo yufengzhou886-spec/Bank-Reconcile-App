@@ -10,14 +10,12 @@ from receipt_parser import parse_receipt_pdf
 from data_cleaner import clean_bank_data
 from reconciler import reconcile_and_export
 
-# ================= 1. 页面配置（必须在第一行） =================
 st.set_page_config(
     page_title="智能财务对账系统",
     page_icon="📊",
     layout="wide"
 )
 
-# ================= 2. 文件夹初始化 =================
 TEMP_DIR = "temp_workspace"
 OUTPUT_DIR = "output_workspace"
 
@@ -31,50 +29,21 @@ def init_env():
 init_env()
 
 
-# ================= ⭐ 3. 全站密码锁系统 ⭐ =================
-def check_password():
-    """验证用户输入的密码是否正确"""
-
-    def password_entered():
-        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]
-        else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        st.markdown("### 🔒 系统已加密")
-        st.text_input("请输入财务系统访问密码：", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.markdown("### 🔒 系统已加密")
-        st.text_input("请输入财务系统访问密码：", type="password", on_change=password_entered, key="password")
-        st.error("❌ 密码错误，请重试！")
-        return False
-    return True
-
-
-if not check_password():
-    st.stop()
-
-
-# ==========================================================
-
-
-# ================= 4. 核心功能函数 =================
+# ================= ⭐ 新增：重置状态的函数 =================
 def reset_state():
-    """当上传框里的文件或银行选项发生变动时，立刻抹除系统'已对账'的记忆"""
+    """当上传框里的文件发生变动时，立刻抹除系统'已对账'的记忆"""
     if "is_processed" in st.session_state:
         st.session_state.is_processed = False
 
 
+# =======================================================
+
 @st.cache_data(show_spinner=False)
-def process_single_bank(file_bytes, file_name, bank_type):
+def process_single_bank(file_bytes, file_name):
     temp_path = os.path.join(TEMP_DIR, f"bank_{file_name}")
     with open(temp_path, "wb") as f:
         f.write(file_bytes)
-    # 将银行类型传给底层的多银行分发引擎
-    raw_df = parse_bank_pdf(temp_path, bank_type=bank_type)
+    raw_df = parse_bank_pdf(temp_path)
     return clean_bank_data(raw_df)
 
 
@@ -91,7 +60,6 @@ def get_reconcile_result(df_bank, df_receipt):
     return reconcile_and_export(df_bank, df_receipt, output_dir=OUTPUT_DIR)
 
 
-# ================= 5. 主体 UI 界面构建 =================
 st.title("📊 智能财务对账系统")
 st.markdown("支持批量上传并合并对账，对账结果将自动同步至云端看板。")
 st.divider()
@@ -104,18 +72,13 @@ with tab_reconcile:
 
     with col1:
         st.subheader("🏦 1. 银行对账单 (支持多选)")
-
-        bank_type = st.selectbox(
-            "👉 请选择银行模板",
-            options=["招商银行", "工商银行 (开发中)"],
-            on_change=reset_state
-        )
-
+        # 注意这里加了 on_change=reset_state
         bank_files = st.file_uploader("请拖拽或选择多个银行流水 PDF", type=["pdf"], key="bank", accept_multiple_files=True,
                                       on_change=reset_state)
 
     with col2:
         st.subheader("🧾 2. 电子回单 (支持多选)")
+        # 注意这里加了 on_change=reset_state
         receipt_files = st.file_uploader("请拖拽或选择多个回单 PDF", type=["pdf"], key="receipt", accept_multiple_files=True,
                                          on_change=reset_state)
 
@@ -137,8 +100,8 @@ with tab_reconcile:
     if st.session_state.is_processed and bank_files and receipt_files:
         with st.spinner("系统正在努力解析和合并多个文件，请稍候..."):
             try:
-                # 批量解析文件，并把用户选择的 bank_type 传进处理函数中
-                df_bank_list = [process_single_bank(bf.getvalue(), bf.name, bank_type) for bf in bank_files]
+                # 处理逻辑
+                df_bank_list = [process_single_bank(bf.getvalue(), bf.name) for bf in bank_files]
                 df_bank_list = [df for df in df_bank_list if not df.empty]
                 df_bank_all = pd.concat(df_bank_list, ignore_index=True) if df_bank_list else pd.DataFrame()
 
@@ -147,20 +110,18 @@ with tab_reconcile:
                 df_receipt_all = pd.concat(df_receipt_list, ignore_index=True) if df_receipt_list else pd.DataFrame()
 
                 if df_bank_all.empty or df_receipt_all.empty:
-                    st.error(f"❌ 解析失败或数据为空。如果您选择了开发中的银行模板，请等待后续更新。")
+                    st.error("❌ 解析失败或数据为空，请检查文件格式。")
                 else:
                     df_result = get_reconcile_result(df_bank_all, df_receipt_all)
                     display_df = df_result.copy()
 
-                    st.success(f"🎉 批量加载成功！共合并了 {len(bank_files)} 份流水({bank_type}) 和 {len(receipt_files)} 份回单。")
+                    st.success(f"🎉 批量加载成功！共合并了 {len(bank_files)} 份银行流水和 {len(receipt_files)} 份回单。")
 
                     st.subheader("📈 对账概览")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("合并后流水笔数", len(df_bank_all))
                     m2.metric("合并后回单笔数", len(df_receipt_all))
-
-                    success_statuses = ["✔ 精确匹配", "⚠️ 容差匹配(含手续费)", "🔄 组合匹配(多张回单)"]
-                    matched_count = len(df_result[df_result["状态"].isin(success_statuses)])
+                    matched_count = len(df_result[df_result["状态"] == "✔ 已对账"])
                     m3.metric("成功匹配笔数", matched_count)
 
                     st.markdown("<br>", unsafe_allow_html=True)
@@ -187,14 +148,8 @@ with tab_reconcile:
                     with chart_col1:
                         status_counts = df_result["状态"].value_counts().reset_index()
                         status_counts.columns = ["状态", "数量"]
-                        color_map = {
-                            "✔ 精确匹配": "#28a745",
-                            "⚠️ 容差匹配(含手续费)": "#17a2b8",
-                            "🔄 组合匹配(多张回单)": "#6f42c1",
-                            "❌ 未找到回单": "#dc3545",
-                            "➕ 收入-不校验": "#6c757d",
-                            "⚠️ 人工确认已核对": "#ffc107"
-                        }
+                        color_map = {"✔ 已对账": "#28a745", "❌ 未找到回单": "#dc3545", "➕ 收入-不校验": "#6c757d",
+                                     "⚠️ 人工确认已核对": "#ffc107"}
                         fig_pie = px.pie(status_counts, names="状态", values="数量", title="状态分布", color="状态",
                                          color_discrete_map=color_map, hole=0.4)
                         st.plotly_chart(fig_pie, use_container_width=True)
@@ -213,31 +168,19 @@ with tab_reconcile:
 
                     st.divider()
                     st.subheader("📋 详细结果 (支持双击修改)")
-                    status_options = ["✔ 精确匹配", "⚠️ 容差匹配(含手续费)", "🔄 组合匹配(多张回单)", "❌ 未找到回单", "➕ 收入-不校验", "⚠️ 人工确认已核对"]
+                    status_options = ["✔ 已对账", "❌ 未找到回单", "➕ 收入-不校验", "⚠️ 人工确认已核对"]
                     edited_df = st.data_editor(
                         display_df,
                         column_config={
                             "状态": st.column_config.SelectboxColumn("状态 (双击修改)", options=status_options, required=True)},
-                        disabled=["交易日期", "银行金额", "匹配回单数", "月份", "智能备注"],
+                        disabled=["交易日期", "银行金额", "匹配回单数", "月份"],
                         use_container_width=True, hide_index=True, height=400
                     )
 
-                    # ⭐ 完美版 Excel 导出引擎（带自适应列宽）
                     st.divider()
                     st.subheader("💾 导出结果")
                     final_excel_path = os.path.join(OUTPUT_DIR, "最终对账单.xlsx")
-
-                    with pd.ExcelWriter(final_excel_path, engine='openpyxl') as writer:
-                        edited_df.to_excel(writer, index=False, sheet_name='自动对账明细')
-                        worksheet = writer.sheets['自动对账明细']
-
-                        # 遍历每一列，动态计算最合适的宽度
-                        for i, col in enumerate(edited_df.columns):
-                            # 计算这一列里最长的那行字有多少个字符，包含列名本身
-                            max_len = max(edited_df[col].astype(str).apply(len).max(), len(str(col)))
-                            # 稍微加一点余量，乘以 2.2 确保中文和日期不被挤压
-                            worksheet.column_dimensions[chr(65 + i)].width = max_len * 2.2
-
+                    edited_df.to_excel(final_excel_path, index=False)
                     with open(final_excel_path, "rb") as f:
                         st.download_button("📥 下载最新对账 Excel", data=f, file_name="自动化批量对账结果.xlsx",
                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
