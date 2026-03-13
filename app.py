@@ -36,29 +36,24 @@ def check_password():
     """验证用户输入的密码是否正确"""
 
     def password_entered():
-        # 检查输入密码是否和 Secrets 里的密码一致
         if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
             st.session_state["password_correct"] = True
-            del st.session_state["password"]  # 验证通过后立刻销毁明文密码，保证安全
+            del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
-    # 首次访问，还没有验证记录
     if "password_correct" not in st.session_state:
         st.markdown("### 🔒 系统已加密")
         st.text_input("请输入财务系统访问密码：", type="password", on_change=password_entered, key="password")
         return False
-    # 验证记录是 False，说明输错了
     elif not st.session_state["password_correct"]:
         st.markdown("### 🔒 系统已加密")
         st.text_input("请输入财务系统访问密码：", type="password", on_change=password_entered, key="password")
         st.error("❌ 密码错误，请重试！")
         return False
-    # 密码正确，放行！
     return True
 
 
-# 核心拦截逻辑：如果密码没通过，强行停止运行后面的所有代码！
 if not check_password():
     st.stop()
 
@@ -68,17 +63,19 @@ if not check_password():
 
 # ================= 4. 核心功能函数 =================
 def reset_state():
-    """当上传框里的文件发生变动时，立刻抹除系统'已对账'的记忆"""
+    """当上传框里的文件或银行选项发生变动时，立刻抹除系统'已对账'的记忆"""
     if "is_processed" in st.session_state:
         st.session_state.is_processed = False
 
 
+# ⭐ 注意这里新增了 bank_type 参数
 @st.cache_data(show_spinner=False)
-def process_single_bank(file_bytes, file_name):
+def process_single_bank(file_bytes, file_name, bank_type):
     temp_path = os.path.join(TEMP_DIR, f"bank_{file_name}")
     with open(temp_path, "wb") as f:
         f.write(file_bytes)
-    raw_df = parse_bank_pdf(temp_path)
+    # 将银行类型传给底层的多银行分发引擎
+    raw_df = parse_bank_pdf(temp_path, bank_type=bank_type)
     return clean_bank_data(raw_df)
 
 
@@ -108,6 +105,14 @@ with tab_reconcile:
 
     with col1:
         st.subheader("🏦 1. 银行对账单 (支持多选)")
+
+        # ⭐ 新增：银行类型选择器
+        bank_type = st.selectbox(
+            "👉 请选择银行模板",
+            options=["招商银行", "工商银行 (开发中)"],
+            on_change=reset_state
+        )
+
         bank_files = st.file_uploader("请拖拽或选择多个银行流水 PDF", type=["pdf"], key="bank", accept_multiple_files=True,
                                       on_change=reset_state)
 
@@ -134,8 +139,8 @@ with tab_reconcile:
     if st.session_state.is_processed and bank_files and receipt_files:
         with st.spinner("系统正在努力解析和合并多个文件，请稍候..."):
             try:
-                # 批量解析文件
-                df_bank_list = [process_single_bank(bf.getvalue(), bf.name) for bf in bank_files]
+                # ⭐ 批量解析文件，并把用户选择的 bank_type 传进处理函数中
+                df_bank_list = [process_single_bank(bf.getvalue(), bf.name, bank_type) for bf in bank_files]
                 df_bank_list = [df for df in df_bank_list if not df.empty]
                 df_bank_all = pd.concat(df_bank_list, ignore_index=True) if df_bank_list else pd.DataFrame()
 
@@ -143,16 +148,14 @@ with tab_reconcile:
                 df_receipt_list = [df for df in df_receipt_list if not df.empty]
                 df_receipt_all = pd.concat(df_receipt_list, ignore_index=True) if df_receipt_list else pd.DataFrame()
 
-                # 验证数据是否为空
                 if df_bank_all.empty or df_receipt_all.empty:
-                    st.error("❌ 解析失败或数据为空，请检查文件格式。")
+                    st.error(f"❌ 解析失败或数据为空。如果您选择了开发中的银行模板，请等待后续更新。")
                 else:
                     df_result = get_reconcile_result(df_bank_all, df_receipt_all)
                     display_df = df_result.copy()
 
-                    st.success(f"🎉 批量加载成功！共合并了 {len(bank_files)} 份银行流水和 {len(receipt_files)} 份回单。")
+                    st.success(f"🎉 批量加载成功！共合并了 {len(bank_files)} 份流水({bank_type}) 和 {len(receipt_files)} 份回单。")
 
-                    # ⭐ 更新后的统计卡片
                     st.subheader("📈 对账概览")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("合并后流水笔数", len(df_bank_all))
@@ -163,7 +166,6 @@ with tab_reconcile:
                     matched_count = len(df_result[df_result["状态"].isin(success_statuses)])
                     m3.metric("成功匹配笔数", matched_count)
 
-                    # 云端备份
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("☁️ 备份本次对账概览到云端", type="secondary"):
                         try:
@@ -182,24 +184,20 @@ with tab_reconcile:
                         except Exception as e:
                             st.error(f"❌ 备份失败: {e}")
 
-                    # ⭐ 更新后的绘图区域
                     st.divider()
                     st.subheader("🎨 财务可视化分析")
                     chart_col1, chart_col2 = st.columns(2)
                     with chart_col1:
                         status_counts = df_result["状态"].value_counts().reset_index()
                         status_counts.columns = ["状态", "数量"]
-
-                        # 给新状态赋予极具辨识度的专属颜色！
                         color_map = {
-                            "✔ 精确匹配": "#28a745",  # 绿色：完美
-                            "⚠️ 容差匹配(含手续费)": "#17a2b8",  # 蓝绿色：轻微注意
-                            "🔄 组合匹配(多张回单)": "#6f42c1",  # 紫色：算法发力
-                            "❌ 未找到回单": "#dc3545",  # 红色：未匹配
-                            "➕ 收入-不校验": "#6c757d",  # 灰色：跳过
-                            "⚠️ 人工确认已核对": "#ffc107"  # 黄色：人工介入
+                            "✔ 精确匹配": "#28a745",
+                            "⚠️ 容差匹配(含手续费)": "#17a2b8",
+                            "🔄 组合匹配(多张回单)": "#6f42c1",
+                            "❌ 未找到回单": "#dc3545",
+                            "➕ 收入-不校验": "#6c757d",
+                            "⚠️ 人工确认已核对": "#ffc107"
                         }
-
                         fig_pie = px.pie(status_counts, names="状态", values="数量", title="状态分布", color="状态",
                                          color_discrete_map=color_map, hole=0.4)
                         st.plotly_chart(fig_pie, use_container_width=True)
@@ -216,22 +214,17 @@ with tab_reconcile:
                         else:
                             st.info("没有支出记录。")
 
-                    # ⭐ 更新后的数据表格展示
                     st.divider()
                     st.subheader("📋 详细结果 (支持双击修改)")
-
-                    # 把新状态加入双击修改的选项中
                     status_options = ["✔ 精确匹配", "⚠️ 容差匹配(含手续费)", "🔄 组合匹配(多张回单)", "❌ 未找到回单", "➕ 收入-不校验", "⚠️ 人工确认已核对"]
-
                     edited_df = st.data_editor(
                         display_df,
                         column_config={
                             "状态": st.column_config.SelectboxColumn("状态 (双击修改)", options=status_options, required=True)},
-                        disabled=["交易日期", "银行金额", "匹配回单数", "月份", "智能备注"],  # 注意这里锁定了智能备注列
+                        disabled=["交易日期", "银行金额", "匹配回单数", "月份", "智能备注"],
                         use_container_width=True, hide_index=True, height=400
                     )
 
-                    # 结果下载
                     st.divider()
                     st.subheader("💾 导出结果")
                     final_excel_path = os.path.join(OUTPUT_DIR, "最终对账单.xlsx")

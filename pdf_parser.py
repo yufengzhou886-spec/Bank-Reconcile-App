@@ -3,7 +3,11 @@ import pandas as pd
 import re
 
 
-def parse_bank_pdf(pdf_path):
+# ==========================================
+# 🏦 1号流水线：招商银行解析器
+# ==========================================
+def _parse_cmb_pdf(pdf_path):
+    """专门处理招商银行 PDF 的逻辑"""
     records = []
 
     # 严格匹配金额格式：支持负号、千分位逗号，且必须有两位小数 (例如 100.00, -1,234.56)
@@ -12,7 +16,11 @@ def parse_bank_pdf(pdf_path):
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             # 退回文本提取模式，这个对无边框账单最有效
-            lines = page.extract_text().splitlines()
+            text = page.extract_text()
+            if not text:
+                continue
+
+            lines = text.splitlines()
 
             for line in lines:
                 line = line.strip()
@@ -64,3 +72,30 @@ def parse_bank_pdf(pdf_path):
                 })
 
     return pd.DataFrame(records)
+
+
+# ==========================================
+# 🏦 2号流水线：工商银行解析器 (预留位置)
+# ==========================================
+def _parse_icbc_pdf(pdf_path):
+    """专门处理工商银行 PDF 的逻辑（示例）"""
+    print("⚠️ 工商银行解析引擎正在开发中...")
+    # 未来如果要加别的银行，参考上面招行的写法，最后 return 一个 DataFrame 即可
+    return pd.DataFrame()
+
+
+# ==========================================
+# 🚦 中央调度室 (Router)
+# ==========================================
+def parse_bank_pdf(pdf_path, bank_type="招商银行"):
+    """
+    根据用户选择的银行，自动将文件分发给对应的解析器
+    """
+    if bank_type == "招商银行":
+        return _parse_cmb_pdf(pdf_path)
+
+    elif bank_type == "工商银行 (开发中)":
+        return _parse_icbc_pdf(pdf_path)
+
+    else:
+        raise ValueError(f"系统暂不支持该银行类型的解析: {bank_type}")
