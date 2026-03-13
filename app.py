@@ -10,12 +10,14 @@ from receipt_parser import parse_receipt_pdf
 from data_cleaner import clean_bank_data
 from reconciler import reconcile_and_export
 
+# ================= 1. 页面配置（必须在第一行） =================
 st.set_page_config(
     page_title="智能财务对账系统",
     page_icon="📊",
     layout="wide"
 )
 
+# ================= 2. 文件夹初始化 =================
 TEMP_DIR = "temp_workspace"
 OUTPUT_DIR = "output_workspace"
 
@@ -29,14 +31,47 @@ def init_env():
 init_env()
 
 
-# ================= ⭐ 新增：重置状态的函数 =================
+# ================= ⭐ 3. 全站密码锁系统 ⭐ =================
+def check_password():
+    """验证用户输入的密码是否正确"""
+
+    def password_entered():
+        # 检查输入密码是否和 Secrets 里的密码一致
+        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # 验证通过后立刻销毁明文密码，保证安全
+        else:
+            st.session_state["password_correct"] = False
+
+    # 首次访问，还没有验证记录
+    if "password_correct" not in st.session_state:
+        st.markdown("### 🔒 系统已加密")
+        st.text_input("请输入财务系统访问密码：", type="password", on_change=password_entered, key="password")
+        return False
+    # 验证记录是 False，说明输错了
+    elif not st.session_state["password_correct"]:
+        st.markdown("### 🔒 系统已加密")
+        st.text_input("请输入财务系统访问密码：", type="password", on_change=password_entered, key="password")
+        st.error("❌ 密码错误，请重试！")
+        return False
+    # 密码正确，放行！
+    return True
+
+
+# 核心拦截逻辑：如果密码没通过，强行停止运行后面的所有代码！
+if not check_password():
+    st.stop()
+
+
+# ==========================================================
+
+
+# ================= 4. 核心功能函数 =================
 def reset_state():
     """当上传框里的文件发生变动时，立刻抹除系统'已对账'的记忆"""
     if "is_processed" in st.session_state:
         st.session_state.is_processed = False
 
-
-# =======================================================
 
 @st.cache_data(show_spinner=False)
 def process_single_bank(file_bytes, file_name):
@@ -60,6 +95,7 @@ def get_reconcile_result(df_bank, df_receipt):
     return reconcile_and_export(df_bank, df_receipt, output_dir=OUTPUT_DIR)
 
 
+# ================= 5. 主体 UI 界面构建 =================
 st.title("📊 智能财务对账系统")
 st.markdown("支持批量上传并合并对账，对账结果将自动同步至云端看板。")
 st.divider()
@@ -72,13 +108,11 @@ with tab_reconcile:
 
     with col1:
         st.subheader("🏦 1. 银行对账单 (支持多选)")
-        # 注意这里加了 on_change=reset_state
         bank_files = st.file_uploader("请拖拽或选择多个银行流水 PDF", type=["pdf"], key="bank", accept_multiple_files=True,
                                       on_change=reset_state)
 
     with col2:
         st.subheader("🧾 2. 电子回单 (支持多选)")
-        # 注意这里加了 on_change=reset_state
         receipt_files = st.file_uploader("请拖拽或选择多个回单 PDF", type=["pdf"], key="receipt", accept_multiple_files=True,
                                          on_change=reset_state)
 
@@ -100,7 +134,7 @@ with tab_reconcile:
     if st.session_state.is_processed and bank_files and receipt_files:
         with st.spinner("系统正在努力解析和合并多个文件，请稍候..."):
             try:
-                # 处理逻辑
+                # 批量解析文件
                 df_bank_list = [process_single_bank(bf.getvalue(), bf.name) for bf in bank_files]
                 df_bank_list = [df for df in df_bank_list if not df.empty]
                 df_bank_all = pd.concat(df_bank_list, ignore_index=True) if df_bank_list else pd.DataFrame()
@@ -109,6 +143,7 @@ with tab_reconcile:
                 df_receipt_list = [df for df in df_receipt_list if not df.empty]
                 df_receipt_all = pd.concat(df_receipt_list, ignore_index=True) if df_receipt_list else pd.DataFrame()
 
+                # 验证数据是否为空
                 if df_bank_all.empty or df_receipt_all.empty:
                     st.error("❌ 解析失败或数据为空，请检查文件格式。")
                 else:
@@ -117,6 +152,7 @@ with tab_reconcile:
 
                     st.success(f"🎉 批量加载成功！共合并了 {len(bank_files)} 份银行流水和 {len(receipt_files)} 份回单。")
 
+                    # 统计卡片
                     st.subheader("📈 对账概览")
                     m1, m2, m3 = st.columns(3)
                     m1.metric("合并后流水笔数", len(df_bank_all))
@@ -124,6 +160,7 @@ with tab_reconcile:
                     matched_count = len(df_result[df_result["状态"] == "✔ 已对账"])
                     m3.metric("成功匹配笔数", matched_count)
 
+                    # 云端备份
                     st.markdown("<br>", unsafe_allow_html=True)
                     if st.button("☁️ 备份本次对账概览到云端", type="secondary"):
                         try:
@@ -142,6 +179,7 @@ with tab_reconcile:
                         except Exception as e:
                             st.error(f"❌ 备份失败: {e}")
 
+                    # 绘图区域
                     st.divider()
                     st.subheader("🎨 财务可视化分析")
                     chart_col1, chart_col2 = st.columns(2)
@@ -166,6 +204,7 @@ with tab_reconcile:
                         else:
                             st.info("没有支出记录。")
 
+                    # 数据表格展示
                     st.divider()
                     st.subheader("📋 详细结果 (支持双击修改)")
                     status_options = ["✔ 已对账", "❌ 未找到回单", "➕ 收入-不校验", "⚠️ 人工确认已核对"]
@@ -177,6 +216,7 @@ with tab_reconcile:
                         use_container_width=True, hide_index=True, height=400
                     )
 
+                    # 结果下载
                     st.divider()
                     st.subheader("💾 导出结果")
                     final_excel_path = os.path.join(OUTPUT_DIR, "最终对账单.xlsx")
