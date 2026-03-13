@@ -7,7 +7,7 @@ def reconcile_and_export(df_bank, df_receipt, output_dir="output_workspace", tol
     bank = df_bank.copy()
     receipt = df_receipt.copy()
 
-    # 安全检查：以防万一列名没改对
+    # 安全检查列名
     if "金额" in bank.columns and "银行金额" not in bank.columns:
         bank.rename(columns={"金额": "银行金额"}, inplace=True)
 
@@ -25,28 +25,28 @@ def reconcile_and_export(df_bank, df_receipt, output_dir="output_workspace", tol
         b_amt = b_row["银行金额"]
         b_date = b_row["交易日期"]
 
-        # ⭐ 修复 2：将日期锁定池从 ±3天 暴增到 ±180天！专治各种“后补打印件”
+        # 🌟 遵从你的规则：收入跳过
+        if b_amt > 0:
+            bank.at[i, "状态"] = "➕ 收入-不校验"
+            continue
+
+        # 🌟 修复点4：日期搜索范围扩大至前后 180 天，以包容“打印日期”与“交易日期”的跨度
         unmatched = receipt[~receipt["已匹配"]]
         date_mask = (unmatched["交易日期"] >= b_date - pd.Timedelta(days=180)) & \
                     (unmatched["交易日期"] <= b_date + pd.Timedelta(days=180))
         candidates = unmatched[date_mask]
 
         if candidates.empty:
-            # 如果没找到回单，且金额是正数，大概率是真的收入
-            if b_amt > 0:
-                bank.at[i, "状态"] = "➕ 收入-不校验"
             continue
 
         # ================= 🥇 第一级：精确匹配 =================
-        # ⭐ 修复 3：完全无视正负号 (abs)，管你是正数还是负数，绝对值对上就行！
-        exact_match = candidates[np.isclose(candidates["金额"].abs(), abs(b_amt), atol=0.01)]
+        exact_match = candidates[np.isclose(candidates["金额"], b_amt, atol=0.01)]
         if not exact_match.empty:
             r_idx = exact_match.index[0]
             receipt.at[r_idx, "已匹配"] = True
             bank.at[i, "状态"] = "✔ 精确匹配"
             bank.at[i, "匹配回单数"] = 1
             bank.at[i, "智能备注"] = f"回单日期:{receipt.at[r_idx, '交易日期'].strftime('%Y-%m-%d')}"
-            bank.at[i, "银行金额"] = -abs(b_amt) # 匹配成功后，强行转为负数支出，以点亮大屏的图表！
             continue
 
         # ================= 🥈 第二级：容差匹配 (含手续费) =================
@@ -58,8 +58,7 @@ def reconcile_and_export(df_bank, df_receipt, output_dir="output_workspace", tol
             receipt.at[r_idx, "已匹配"] = True
             bank.at[i, "状态"] = "⚠️ 容差匹配(含手续费)"
             bank.at[i, "匹配回单数"] = 1
-            bank.at[i, "智能备注"] = f"推测手续费: {fee:.2f}元"
-            bank.at[i, "银行金额"] = -abs(b_amt)
+            bank.at[i, "智能备注"] = f"推测包含手续费: {fee:.2f}元"
             continue
 
         # ================= 🥉 第三级：多对一组合匹配 =================
@@ -69,21 +68,16 @@ def reconcile_and_export(df_bank, df_receipt, output_dir="output_workspace", tol
 
         for r_count in range(2, min(5, len(c_indices) + 1)):
             for combo in itertools.combinations(c_indices, r_count):
-                combo_sum = receipt.loc[list(combo), "金额"].abs().sum()
-                if np.isclose(combo_sum, abs(b_amt), atol=0.01):
+                combo_sum = receipt.loc[list(combo), "金额"].sum()
+                if np.isclose(combo_sum, b_amt, atol=0.01):
                     for idx in combo:
                         receipt.at[idx, "已匹配"] = True
                     bank.at[i, "状态"] = "🔄 组合匹配(多张回单)"
                     bank.at[i, "匹配回单数"] = r_count
                     bank.at[i, "智能备注"] = f"由 {r_count} 张回单合并构成"
-                    bank.at[i, "银行金额"] = -abs(b_amt)
                     found_combo = True
                     break
             if found_combo: break
-
-        # 补刀逻辑：全没匹配上，且金额是正数，标回收入
-        if bank.at[i, "状态"] == "❌ 未找到回单" and b_amt > 0:
-            bank.at[i, "状态"] = "➕ 收入-不校验"
 
     bank["月份"] = bank["交易日期"].dt.strftime("%Y-%m")
     if not os.path.exists(output_dir): os.makedirs(output_dir)
